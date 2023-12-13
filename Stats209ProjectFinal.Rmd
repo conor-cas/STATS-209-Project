@@ -1,0 +1,541 @@
+---
+title: "Stats209Project"
+output: html_document
+date: "2023-12-08"
+---
+
+## Setup
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(dplyr)
+library(AER)
+library(progress)
+library(DOS2)
+library(optmatch)
+library(rcbalance)
+library(RItools)
+```
+
+
+## Importing data
+```{r}
+pre <- read.csv("/Users/nataliehilderbrand/Downloads/sb_ca2019_all_csv_v4/sb_ca2019_all_csv_v4.txt")
+post <- read.table("/Users/nataliehilderbrand/Downloads/sb_ca2021_all_csv_v2/sb_ca2021_all_csv_v2.txt", header = TRUE, sep = "^")
+pre <- pre %>% filter(County.Code != 0 & District.Code != 0 & School.Code != 0 & Grade != 13)
+post <- post %>% filter(County.Code != 0 & District.Code != 0 & School.Code != 0 & Grade != 13)
+```
+
+## Cleaning
+```{r}
+post <- subset(post, select = -Type.ID)
+names(post)[names(post) == "Percentage.Standard.Met.and.Above"] <- "passed"
+colnames(pre) <- colnames(post)
+
+# drop columns we don't need
+pre <- pre[, c("Student.Group.ID","Students.with.Scores", "Students.Enrolled", "Test.ID", "Grade", "Test.Year", "School.Code", "passed")]
+post <- post[, c("Student.Group.ID","Students.with.Scores", "Students.Enrolled", "Test.ID", "Grade", "Test.Year", "School.Code", "passed")]
+```
+
+
+
+
+
+# All student groups: difference between 2019 and 2021 scores
+## All student groups
+```{r}
+pre_all <- pre %>% filter(Student.Group.ID == 1)
+post_all <- post %>% filter(Student.Group.ID == 1)
+
+# drop null columns
+pre_all <- pre_all[!is.na(pre_all$passed) & pre_all$passed!="" & pre_all$passed!="*",]
+post_all <- post_all[!is.na(post_all$passed) & post_all$passed!="" & post_all$passed!="*",]
+
+# add ID for matching with school code, grade, test type
+pre_all$ID <- paste(pre_all$School.Code,pre_all$Grade,pre_all$Test.ID,sep="")
+post_all$ID <- paste(post_all$School.Code,post_all$Grade,post_all$Test.ID,sep="")
+```
+
+## Matching on all student groups
+```{r}
+all <- data.frame(pre_all)
+matches <- list()
+match_scores <- list()
+for (i in 1:(nrow(all))) {
+  curr_id <- all[i,"ID"]
+  new_val <- ifelse(any(post_all$ID == curr_id), post_all[post_all$ID == curr_id, "passed"], "*")
+  scores <- ifelse(any(post_all$ID == curr_id), 
+                   post_all[post_all$ID == curr_id, "Students.with.Scores"], "*")
+  matches <- c(matches, new_val)
+  match_scores <- c(match_scores, scores)
+}
+all$post_passed <- matches
+all$post_numscores <- match_scores
+
+# drop *'s
+names(all)[names(all) == "passed"] <- "pre_passed"
+all <- all[all$post_passed!="*",]
+
+all <- all[all$post_numscores!="*",]
+```
+
+## Big tau
+```{r}
+all$total.students <- as.numeric(as.character(all$Students.with.Scores)) + as.numeric(as.character(all$post_numscores))
+all$post_passed <- as.numeric(as.character(all$post_passed))
+all$pre_passed <- as.numeric(as.character(all$pre_passed))
+all$diff <- as.numeric(all$post_passed - all$pre_passed)
+T_hat <- weighted.mean(all$diff, as.numeric(all$total.students))
+print(T_hat)
+```
+
+## Fisher randomization test
+```{r}
+reps <- 10000
+ts <- rep(0,reps)
+set.seed(1)
+
+for (i in 1:reps) {
+  assigns <- sample(c(-1, 1), size = nrow(all), replace = TRUE)
+  dup <- all$diff * assigns
+  ts[i] <- weighted.mean(dup, as.numeric(all$total.students))
+}
+p <- length(ts[ts <= T_hat])/reps
+print(min(ts))
+print(p)
+```
+
+## Wilcox Inference
+```{r}
+w_results = wilcox.test(all$pre_passed, all$post_passed, paired = TRUE, alternative = "greater")
+
+print(w_results)
+```
+
+
+
+
+# All student groups diff in diff: change in math score vs change in english score from 2019 to 2021
+## Matching again, based on test ID
+```{r}
+all_t1 <- all[all$Test.ID==1,]
+all_t2 <- all[all$Test.ID==2,]
+all_t1$ID <- paste(all_t1$School.Code,all_t1$Grade,sep="")
+all_t2$ID <- paste(all_t2$School.Code,all_t2$Grade,sep="")
+
+matches_diff <- list()
+matches_n <- list()
+
+for (i in 1:(nrow(all_t1))) {
+  curr_id <- all_t1[i,"ID"]
+  new_diff <- ifelse(any(all_t2$ID == curr_id), all_t2[all_t2$ID == curr_id, "diff"], "*")
+  new_n <- ifelse(any(all_t2$ID == curr_id), 
+                   all_t2[all_t2$ID == curr_id, "total.students"], "*")
+  matches_diff <- c(matches_diff, new_diff)
+  matches_n <- c(matches_n, new_n)
+}
+all_t1$t2_diff <- matches_diff
+all_t1$t2_numscores <- matches_n
+
+# drop *'s
+names(all_t1)[names(all_t1) == "diff"] <- "t1_diff"
+all_t1 <- all_t1[all_t1$t1_diff!="*" & all_t1$t2_diff!="*",]
+```
+
+
+## Big tau
+```{r}
+all_t1$total.students <- as.numeric(as.character(all_t1$total.students)) + as.numeric(as.character(all_t1$t2_numscores))
+all_t1$t1_diff <- as.numeric(as.character(all_t1$t1_diff))
+all_t1$t2_diff <- as.numeric(as.character(all_t1$t2_diff))
+all_t1$diffindiff <- as.numeric(all_t1$t1_diff - all_t1$t2_diff)
+T_hat <- weighted.mean(all_t1$diffindiff, as.numeric(all_t1$total.students))
+print(T_hat)
+```
+
+
+
+## Fisher randomization test
+```{r}
+reps <- 10000
+ts <- rep(0,reps)
+set.seed(1)
+
+for (i in 1:reps) {
+  assigns <- sample(c(-1, 1), size = nrow(all), replace = TRUE)
+  dup <- all$diff * assigns
+  ts[i] <- weighted.mean(dup, as.numeric(all$total.students))
+}
+p <- length(ts[ts >= T_hat])/reps
+print(p)
+```
+
+## Wilcox Inference
+```{r}
+w_results = wilcox.test(all$pre_passed, all$post_passed, paired = TRUE, alternative = "two.sided")
+print(w_results)
+```
+
+
+
+
+
+
+# All student groups diff in diff: change from 2017-2019 vs change from 2019-2021
+```{r}
+prepre <- read.csv("/Users/NatalieHilderbrand/Downloads/sb_ca2017_all_csv_v2/sb_ca2017_all_csv_v2.txt")
+prepre <- prepre %>% filter(County.Code != 0 & District.Code != 0 & School.Code != 0 & Grade != 13)
+```
+
+## Cleaning
+```{r}
+prepre <- prepre[, c("Subgroup.ID","Total.Tested.with.Scores", "Total.Tested.At.Entity.Level", "Test.Id", "Grade", "Test.Year", "School.Code", "Percentage.Standard.Met.and.Above")]
+colnames(prepre) <- colnames(post)
+```
+
+## All student groups
+```{r}
+prepre_all <- prepre %>% filter(Student.Group.ID == 1)
+prepre_all <- prepre_all[!is.na(prepre_all$passed) & prepre_all$passed!="" & prepre_all$passed!="*",]
+prepre_all$ID <- paste(prepre_all$School.Code,prepre_all$Grade,prepre_all$Test.ID,sep="")
+```
+
+## Matching on all student groups
+```{r}
+all <- data.frame(post_all)
+matches_n_prepre <- list()
+matches_n_pre <- list()
+matches_scores_prepre <- list()
+matches_scores_pre <- list()
+for (i in 1:(nrow(all))) {
+  curr_id <- all[i,"ID"]
+
+  matches_n_pre <- c(matches_n_pre, ifelse(any(pre_all$ID == curr_id), 
+                   pre_all[pre_all$ID == curr_id, "Students.with.Scores"], "*"))
+  matches_scores_pre <- c(matches_scores_pre, ifelse(any(pre_all$ID == curr_id), pre_all[pre_all$ID == curr_id, "passed"], "*"))
+
+  matches_n_prepre <- c(matches_n_prepre, ifelse(any(prepre_all$ID == curr_id), 
+                   prepre_all[prepre_all$ID == curr_id, "Students.with.Scores"], "*"))
+  matches_scores_prepre <- c(matches_scores_prepre, ifelse(any(prepre_all$ID == curr_id), prepre_all[prepre_all$ID == curr_id, "passed"], "*"))
+}
+
+all$pre_passed <- matches_scores_pre
+all$pre_numscores <- matches_n_pre
+all$prepre_passed <- matches_scores_prepre
+all$prepre_numscores <- matches_n_prepre
+
+# drop *'s
+names(all)[names(all) == "passed"] <- "post_passed"
+all <- all[all$pre_passed!="*" & all$prepre_passed!="*" & all$pre_numscores!="*" & all$prepre_numscores!="*",]
+```
+
+## Big tau
+```{r}
+all$total.students <- as.numeric(as.character(all$Students.with.Scores)) + as.numeric(as.character(all$pre_numscores)) + as.numeric(as.character(all$prepre_numscores))
+all$post_passed <- as.numeric(as.character(all$post_passed))
+all$pre_passed <- as.numeric(as.character(all$pre_passed))
+all$prepre_passed <- as.numeric(as.character(all$prepre_passed))
+all$diff1 <- as.numeric(all$pre_passed - all$prepre_passed)
+all$diff2 <- as.numeric(all$post_passed - all$pre_passed)
+all$diffindiff <- as.numeric(all$diff2-all$diff1)
+T_hat <- weighted.mean(all$diffindiff, as.numeric(all$total.students))
+print(T_hat)
+```
+
+```{r}
+diffs <- all$post_passed - all$prepre_passed
+nums <- as.numeric(as.character(all$Students.with.Scores))+as.numeric(as.character(all$prepre_numscores))
+print(weighted.mean(diffs,nums))
+reps <- 10000
+ts <- rep(0,reps)
+set.seed(1)
+
+for (i in 1:reps) {
+  assigns <- sample(c(-1, 1), size = nrow(all), replace = TRUE)
+  dup <- diffs * assigns
+  ts[i] <- weighted.mean(dup, nums)
+}
+p <- length(ts[ts <= T_hat])/reps
+print(p)
+```
+
+
+## Fisher randomization test
+```{r}
+reps <- 10000
+ts <- rep(0,reps)
+set.seed(1)
+
+for (i in 1:reps) {
+  assigns <- sample(c(-1, 1), size = nrow(all), replace = TRUE)
+  dup <- all$diffindiff * assigns
+  ts[i] <- weighted.mean(dup, as.numeric(all$total.students))
+}
+p <- length(ts[ts <= T_hat])/reps
+print(min(ts))
+print(p)
+```
+
+## Wilcox Inference
+```{r}
+w_results = wilcox.test(all$diff1, all$diff2, paired = TRUE, alternative = "greater")
+
+print(w_results)
+```
+
+
+
+
+
+
+
+
+
+
+
+# Analysis on race and economic status
+```{r}
+pre_full_info <- pre %>% filter(Student.Group.ID >= 200 & Student.Group.ID <= 227)
+post_full_info <- post %>% filter(Student.Group.ID >= 200 & Student.Group.ID <= 227)
+
+# drop null columns
+pre_full_info <- pre_full_info[!is.na(pre_full_info$passed) & pre_full_info$passed!="" & pre_full_info$passed!="*",]
+post_full_info <- post_full_info[!is.na(post_all$passed) & post_full_info$passed!="" & post_full_info$passed!="*",]
+
+# add ID for matching with school code, grade, test type
+pre_full_info$ID <- paste(pre_full_info$School.Code,pre_full_info$Grade,pre_full_info$Test.ID,pre_full_info$Student.Group.ID,sep="")
+post_full_info$ID <- paste(post_full_info$School.Code,post_full_info$Grade,post_full_info$Test.ID,post_full_info$Student.Group.ID,sep="")
+```
+
+## Matching
+```{r}
+all <- data.frame(post_full_info)
+match_n <- list()
+match_scores <- list()
+for (i in 1:(nrow(all))) {
+  curr_id <- all[i,"ID"]
+  new_val <- ifelse(any(pre_full_info$ID == curr_id), pre_full_info[pre_full_info$ID == curr_id, "passed"], "*")
+  scores <- ifelse(any(pre_full_info$ID == curr_id), 
+                   pre_full_info[pre_full_info$ID == curr_id, "Students.with.Scores"], "*")
+  match_n <- c(match_n, scores)
+  match_scores <- c(match_scores, new_val)
+}
+all$pre_n <- match_n
+all$pre_passed <- match_scores
+
+# drop *'s
+names(all)[names(all) == "passed"] <- "post_passed"
+all <- all[all$pre_passed!="*" & all$pre_n!="*",]
+```
+
+## One-hot encoding stuff
+```{r}
+all$diff <- as.numeric(as.character(all$post_passed)) - as.numeric(as.character(all$pre_passed))
+all$Test.ID <- all$Test.ID - 1 # 1 if the test is math, 0 if langauge
+all$disadv <- ifelse(all$Student.Group.ID <= 207, 1, 0)
+all$black <- ifelse(all$Student.Group.ID == 200 | all$Student.Group.ID == 220, 1, 0)
+all$hisp <- ifelse(all$Student.Group.ID == 204 | all$Student.Group.ID == 224, 1, 0)
+all$asian <- ifelse(all$Student.Group.ID == 202 | all$Student.Group.ID == 222, 1, 0)
+all$twoormore <- ifelse(all$Student.Group.ID == 207 | all$Student.Group.ID == 227, 1, 0)
+all$native <- ifelse(all$Student.Group.ID == 205 | all$Student.Group.ID == 203 | all$Student.Group.ID == 201 | all$Student.Group.ID == 225 | all$Student.Group.ID == 223 | all$Student.Group.ID == 221, 1, 0)
+```
+
+## Regressing
+```{r}
+lmout <- lm(diff ~ Test.ID + Grade + black + hisp + asian + native, data=all)
+print(summary(lmout))
+lmout2 <- lm(as.numeric(as.character(pre_passed)) ~ Test.ID + disadv + black + hisp + asian + native + Grade, data=all)
+print(summary(lmout2))
+lmout3 <- lm(diff ~ Test.ID*disadv + disadv + Test.ID, data=all)
+print(summary(lmout3))
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+# Analysis of economic status
+```{r}
+pre_ec <- pre %>% filter(Student.Group.ID == 31 | Student.Group.ID == 111)
+post_ec <- post %>% filter(Student.Group.ID == 31 | Student.Group.ID == 111)
+
+# drop null columns
+pre_ec <- pre_ec[!is.na(pre_ec$passed) & pre_ec$passed!="" & pre_ec$passed!="*",]
+post_ec <- post_ec[!is.na(post_ec$passed) & post_ec$passed!="" & post_ec$passed!="*",]
+
+# add ID for matching with school code, grade, test type
+pre_ec$ID <- paste(pre_ec$School.Code,pre_ec$Grade,pre_ec$Test.ID,pre_ec$Student.Group.ID,sep="")
+post_ec$ID <- paste(post_ec$School.Code,post_ec$Grade,post_ec$Test.ID,post_ec$Student.Group.ID,sep="")
+```
+
+## Matching
+```{r}
+all <- data.frame(post_ec)
+match_n <- list()
+match_scores <- list()
+for (i in 1:(nrow(all))) {
+  curr_id <- all[i,"ID"]
+  new_val <- ifelse(any(pre_ec$ID == curr_id), pre_ec[pre_ec$ID == curr_id, "passed"], "*")
+  scores <- ifelse(any(pre_ec$ID == curr_id), 
+                   pre_ec[pre_ec$ID == curr_id, "Students.with.Scores"], "*")
+  match_n <- c(match_n, scores)
+  match_scores <- c(match_scores, new_val)
+}
+all$pre_n <- match_n
+all$pre_passed <- match_scores
+
+# drop *'s
+names(all)[names(all) == "passed"] <- "post_passed"
+all <- all[all$pre_passed!="*" & all$pre_n!="*",]
+```
+
+
+## Tau hat
+```{r}
+all$diff <- as.numeric(as.character(all$pre_passed)) - as.numeric(as.character(all$post_passed))
+all$disadv <- ifelse(all$Student.Group.ID == 31, 1, 0)
+all$total.students <- as.numeric(as.character(all$pre_n)) + as.numeric(as.character(all$Students.with.Scores))
+```
+
+## Matching again
+```{r}
+fin <- all[all$disadv == 1,]
+print(nrow(fin))
+adv <- all[all$disadv == 0,]
+fin$ID <- paste(fin$School.Code,fin$Grade,fin$Test.ID,sep="")
+adv$ID <- paste(adv$School.Code,adv$Grade,adv$Test.ID,sep="")
+
+match_n <- list()
+match_scores <- list()
+for (i in 1:(nrow(fin))) {
+  curr_id <- fin[i,"ID"]
+  new_val <- ifelse(any(adv$ID == curr_id), adv[adv$ID == curr_id, "diff"], "*")
+  scores <- ifelse(any(adv$ID == curr_id), 
+                   adv[adv$ID == curr_id, "total.students"], "*")
+  match_n <- c(match_n, scores)
+  match_scores <- c(match_scores, new_val)
+}
+fin$adv_n <- match_n
+fin$adv_diff <- match_scores
+
+# drop *'s
+names(fin)[names(fin) == "diff"] <- "disadv_diff"
+fin <- fin[fin$adv_diff!="*" & fin$disadv_diff!="*",]
+```
+
+
+```{r}
+fin$diffindiff <- as.numeric(as.character(fin$disadv_diff)) - as.numeric(as.character(fin$adv_diff))
+fin$n <- as.numeric(as.character(fin$total.students)) + as.numeric(as.character(fin$adv_n))
+T_hat <- weighted.mean(fin$diffindiff, as.numeric(fin$n))
+print(T_hat)
+```
+
+```{r}
+print(mean(as.numeric(as.character(fin$pre_passed))))
+print(mean(as.numeric(as.character(fin$post_passed))))
+print(mean(as.numeric(as.character(adv$pre_passed))))
+print(mean(as.numeric(as.character(adv$post_passed))))
+```
+
+## Fisher randomization test
+```{r}
+reps <- 10000
+ts <- rep(0,reps)
+set.seed(1)
+
+for (i in 1:reps) {
+  assigns <- sample(c(-1, 1), size = nrow(fin), replace = TRUE)
+  dup <- fin$diffindiff * assigns
+  ts[i] <- weighted.mean(dup, as.numeric(fin$n))
+}
+p <- length(ts[ts <= T_hat])/reps
+print(min(ts))
+print(p)
+```
+
+
+
+
+
+
+
+
+
+
+# Cohort analysis
+```{r}
+pre_ca <- pre %>% filter(Student.Group.ID == 1)
+post_ca <- post %>% filter(Student.Group.ID == 1)
+
+# drop null columns
+pre_ca <- pre_ca[!is.na(pre_ca$passed) & pre_ca$passed!="" & pre_ca$passed!="*",]
+post_ca <- post_ca[!is.na(post_ca$passed) & post_ca$passed!="" & post_ca$passed!="*",]
+
+pre_ca$Cohort <- pre_ca$Grade
+post_ca$Cohort <- post_ca$Grade-2
+
+# add ID for matching with school code, grade, test type
+pre_ca$ID <- paste(pre_ca$School.Code,pre_ca$Cohort,pre_ca$Test.ID,sep="")
+post_ca$ID <- paste(post_ca$School.Code,post_ca$Cohort,post_ca$Test.ID,sep="")
+```
+
+## Matching
+```{r}
+all <- data.frame(post_ca)
+match_n <- list()
+match_scores <- list()
+for (i in 1:(nrow(all))) {
+  curr_id <- all[i,"ID"]
+  new_val <- ifelse(any(pre_ca$ID == curr_id), pre_ca[pre_ca$ID == curr_id, "passed"], "*")
+  scores <- ifelse(any(pre_ca$ID == curr_id), 
+                   pre_ca[pre_ca$ID == curr_id, "Students.with.Scores"], "*")
+  match_n <- c(match_n, scores)
+  match_scores <- c(match_scores, new_val)
+}
+all$pre_n <- match_n
+all$pre_passed <- match_scores
+
+# drop *'s
+names(all)[names(all) == "passed"] <- "post_passed"
+all <- all[all$pre_passed!="*" & all$pre_n!="*",]
+```
+
+## Big tau
+```{r}
+all$post_passed <- as.numeric(as.character(all$post_passed))
+all$pre_passed <- as.numeric(as.character(all$pre_passed))
+all$diff <- as.numeric(all$post_passed - all$pre_passed)
+T_hat <- weighted.mean(all$diff, as.numeric(all$Students.with.Scores))
+print(T_hat)
+```
+
+## Fisher randomization test
+```{r}
+reps <- 10000
+ts <- rep(0,reps)
+set.seed(1)
+
+for (i in 1:reps) {
+  assigns <- sample(c(-1, 1), size = nrow(all), replace = TRUE)
+  dup <- all$diff * assigns
+  ts[i] <- mean(dup)
+}
+p <- length(ts[ts <= T_hat])/reps
+print(min(ts))
+print(p)
+```
+
+## Wilcox Inference
+```{r}
+w_results = wilcox.test(all$pre_passed, all$post_passed, paired = TRUE, alternative = "greater")
+
+print(w_results)
+```
